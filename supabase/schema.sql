@@ -53,6 +53,9 @@ create table if not exists public.sessions (
   expires_at timestamptz not null
 );
 
+-- 社員はパスワードなしで入れる（店長が設定で切り替え）
+alter table public.stores add column if not exists staff_open boolean not null default true;
+
 -- ブラウザから直接テーブルを読み書きさせない（下の関数経由のみ）
 alter table public.app_global enable row level security;
 alter table public.stores     enable row level security;
@@ -166,11 +169,13 @@ begin
   p_code := lower(trim(p_code));
   if not _valid_code(p_code) then raise exception 'BAD_CODE'; end if;
   if length(trim(coalesce(p_name,''))) = 0 then raise exception 'BAD_NAME'; end if;
-  if length(coalesce(p_manager_pw,'')) < 6 or length(coalesce(p_staff_pw,'')) < 4 then raise exception 'WEAK'; end if;
+  if length(coalesce(p_manager_pw,'')) < 6 then raise exception 'WEAK'; end if;
+  if coalesce(p_staff_pw,'') <> '' and length(p_staff_pw) < 4 then raise exception 'WEAK'; end if;
   if p_manager_pw = p_staff_pw then raise exception 'SAME_PASSWORD'; end if;
   if exists(select 1 from stores where code = p_code) then raise exception 'DUPLICATE'; end if;
-  insert into stores(code, name, manager_hash, staff_hash)
-  values (p_code, trim(p_name), _hash(p_manager_pw), _hash(p_staff_pw));
+  insert into stores(code, name, manager_hash, staff_hash, staff_open)
+  values (p_code, trim(p_name), _hash(p_manager_pw), _hash(coalesce(nullif(p_staff_pw,''), gen_random_uuid()::text)),
+          coalesce(p_staff_pw,'') = '');
   return jsonb_build_object('ok', true);
 end $$;
 
@@ -242,6 +247,45 @@ begin
                             'store', jsonb_build_object('code', s.code, 'name', s.name));
 end $$;
 
+create or replace function public.store_lookup(p_code text) returns jsonb
+language plpgsql stable security definer set search_path = public, extensions as $$
+declare s stores;
+begin
+  select * into s from stores where code = lower(trim(p_code));
+  if s.id is null then return jsonb_build_object('ok', false, 'error', 'NO_STORE'); end if;
+  return jsonb_build_object('ok', true, 'code', s.code, 'name', s.name, 'staffOpen', s.staff_open);
+end $$;
+
+create or replace function public.store_login_staff(p_code text) returns jsonb
+language plpgsql volatile security definer set search_path = public, extensions as $$
+declare s stores;
+begin
+  select * into s from stores where code = lower(trim(p_code));
+  if s.id is null then return jsonb_build_object('ok', false, 'error', 'NO_STORE'); end if;
+  if not s.staff_open then return jsonb_build_object('ok', false, 'error', 'NEED_PASSWORD'); end if;
+  return jsonb_build_object('ok', true, 'token', _new_session('staff', s.id), 'role', 'staff',
+                            'store', jsonb_build_object('code', s.code, 'name', s.name));
+end $$;
+
+create or replace function public.set_staff_open(p_token uuid, p_open boolean) returns jsonb
+language plpgsql volatile security definer set search_path = public, extensions as $$
+declare a record;
+begin
+  select * into a from _auth(p_token, 'manager');
+  update stores set staff_open = coalesce(p_open, true), updated_at = now() where id = a.o_store;
+  return jsonb_build_object('ok', true);
+end $$;
+
+-- みんなの希望（休み希望などの日付だけ。メモは店長だけが見られる）
+create or replace function public.get_wish_board(p_token uuid, p_ym text) returns jsonb
+language plpgsql volatile security definer set search_path = public, extensions as $$
+declare a record;
+begin
+  select * into a from _auth(p_token, 'store');
+  return coalesce((select jsonb_object_agg(staff_id, coalesce(data->'days', '{}'::jsonb))
+                     from wishes where store_id = a.o_store and ym = p_ym), '{}'::jsonb);
+end $$;
+
 create or replace function public.logout(p_token uuid) returns jsonb
 language sql volatile security definer set search_path = public, extensions as $$
   delete from sessions where token = p_token;
@@ -267,7 +311,7 @@ declare a record; s stores;
 begin
   select * into a from _auth(p_token, 'store');
   select * into s from stores where id = a.o_store;
-  return jsonb_build_object('code', s.code, 'name', s.name, 'settings', s.settings, 'updated_at', s.updated_at);
+  return jsonb_build_object('code', s.code, 'name', s.name, 'settings', s.settings, 'updated_at', s.updated_at, 'staffOpen', s.staff_open);
 end $$;
 
 create or replace function public.save_store_settings(p_token uuid, p_settings jsonb) returns jsonb
@@ -333,6 +377,7 @@ begin
     'status', coalesce(m.doc->>'status','collecting'),
     'deadline', m.doc->'deadline',
     'message', m.doc->'message',
+    'overrides', m.doc->'overrides',
     'final', case when m.doc->>'status' = 'final' then m.doc->'final' else null end));
 end $$;
 
@@ -402,6 +447,8 @@ grant execute on function
   public.admin_create_store(uuid, text, text, text, text), public.admin_update_store(uuid, text, text, text, text),
   public.admin_save_global(uuid, text, jsonb), public.get_global(uuid),
   public.store_login(text, text), public.logout(uuid), public.whoami(uuid),
+  public.store_lookup(text), public.store_login_staff(text), public.set_staff_open(uuid, boolean),
+  public.get_wish_board(uuid, text),
   public.get_store(uuid), public.save_store_settings(uuid, jsonb), public.change_store_password(uuid, text, text),
   public.list_months(uuid), public.get_month(uuid, text), public.save_month(uuid, text, jsonb, timestamptz),
   public.delete_month(uuid, text), public.get_wish(uuid, text, text), public.save_wish(uuid, text, text, jsonb)
