@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+<title>MEP,SFA</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;700;900&family=Yusei+Magic&display=swap" rel="stylesheet">
+<style>
+  :root{--pink:#EE6FA3;--pink-deep:#C2185B;--crimson:#E85D82;--ink:#1E1A18;--charcoal:#6B5F58;--paper:#FFF8F2;--line:#F1E4DA;--no:#B4442E;}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{height:100%;}
+  body{margin:0;background:var(--paper);font-family:'Zen Kaku Gothic New',sans-serif;color:var(--ink);-webkit-font-smoothing:antialiased;display:flex;flex-direction:column;}
+  .band{background:linear-gradient(135deg,var(--crimson) 0%,var(--pink) 55%,#FF9EC7 100%);color:#fff;text-align:center;padding:44px 16px 64px;}
+  .band h1{font-family:'Yusei Magic',sans-serif;font-weight:400;font-size:34px;margin:0;letter-spacing:.02em;}
+  .band p{margin:8px 0 0;font-size:12px;opacity:.85;font-weight:700;}
+  .card{background:#fff;border:1px solid var(--line);border-radius:22px;box-shadow:0 18px 44px rgba(140,30,70,.16);max-width:340px;width:calc(100% - 32px);margin:-40px auto 32px;padding:26px 22px 22px;text-align:center;}
+  .card h2{font-size:15px;margin:0 0 4px;}
+  .card .sub{font-size:12px;color:#A8998D;margin:0 0 18px;}
+  .dots{display:flex;justify-content:center;gap:10px;min-height:16px;margin-bottom:6px;}
+  .dot{width:14px;height:14px;border-radius:50%;border:2px solid #F3C3D8;transition:background .12s,border-color .12s;}
+  .dot.on{background:var(--pink);border-color:var(--pink);}
+  .dots.shake{animation:shake .38s;}
+  @keyframes shake{20%,60%{transform:translateX(-8px)}40%,80%{transform:translateX(8px)}}
+  .msg{font-size:12px;min-height:18px;margin:6px 0 10px;font-weight:700;color:var(--no);}
+  .msg.wait{color:var(--charcoal);}
+  .pad{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
+  .key{border:0;background:#FFF3F8;border-radius:16px;height:58px;font-family:inherit;font-size:22px;font-weight:700;color:var(--ink);cursor:pointer;transition:transform .06s,background .12s;}
+  .key:active{transform:scale(.95);background:#FFE1EE;}
+  .key.sub{font-size:13px;color:var(--charcoal);background:transparent;}
+  .key.go{background:linear-gradient(135deg,var(--pink),var(--crimson));color:#fff;font-size:15px;}
+  .key:disabled{opacity:.5;cursor:default;}
+  .remember{display:flex;align-items:center;justify-content:center;gap:6px;margin-top:16px;font-size:12px;color:var(--charcoal);cursor:pointer;user-select:none;}
+  .remember input{accent-color:var(--pink);width:16px;height:16px;}
+  footer{margin-top:auto;text-align:center;font-size:11px;color:#B8A99C;padding:16px;}
+  .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);}
+</style>
+</head>
+<body>
+<div class="band"><h1>MEP,SFA</h1><p>R CREW 営業支援ツール</p></div>
+<div class="card" role="dialog" aria-labelledby="ttl">
+  <h2 id="ttl">🔒 PINコードを入力</h2>
+  <p class="sub">メンバー専用ページです</p>
+  <div class="dots" id="dots" aria-hidden="true"></div>
+  <div class="msg" id="msg" role="status"></div>
+  <div class="pad" id="pad">
+    <button class="key" data-k="1">1</button><button class="key" data-k="2">2</button><button class="key" data-k="3">3</button>
+    <button class="key" data-k="4">4</button><button class="key" data-k="5">5</button><button class="key" data-k="6">6</button>
+    <button class="key" data-k="7">7</button><button class="key" data-k="8">8</button><button class="key" data-k="9">9</button>
+    <button class="key sub" data-k="del" aria-label="1文字消す">⌫ 消す</button><button class="key" data-k="0">0</button><button class="key go" data-k="ok">解除</button>
+  </div>
+  <label class="remember"><input type="checkbox" id="remember"> この端末で記憶する</label>
+</div>
+<footer>CONFIDENTIAL</footer>
+<script>
+(function(){
+  const PAYLOAD = /*__PAYLOAD__*/null;
+  const STORE = 'mepsfa-pin';
+  const MAX = 12;
+  let pin = '';
+  let busy = false;
+  const dotsEl = document.getElementById('dots');
+  const msgEl = document.getElementById('msg');
+  const pad = document.getElementById('pad');
+  const remember = document.getElementById('remember');
+
+  function draw(){
+    const n = Math.max(pin.length, 4);
+    dotsEl.innerHTML = '';
+    for(let i = 0; i < n; i++){
+      const d = document.createElement('span');
+      d.className = 'dot' + (i < pin.length ? ' on' : '');
+      dotsEl.appendChild(d);
+    }
+  }
+  function setBusy(b){
+    busy = b;
+    pad.querySelectorAll('button').forEach(x => x.disabled = b);
+    msgEl.className = 'msg' + (b ? ' wait' : '');
+    if(b) msgEl.textContent = '確認中…';
+  }
+  const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+
+  async function tryUnlock(code, silent){
+    if(busy || !code) return;
+    setBusy(true);
+    try{
+      const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(code), 'PBKDF2', false, ['deriveKey']);
+      const key = await crypto.subtle.deriveKey(
+        { name:'PBKDF2', salt: unb64(PAYLOAD.s), iterations: PAYLOAD.it, hash:'SHA-256' },
+        base, { name:'AES-GCM', length:256 }, false, ['decrypt']);
+      const pt = await crypto.subtle.decrypt({ name:'AES-GCM', iv: unb64(PAYLOAD.i) }, key, unb64(PAYLOAD.c));
+      const html = new TextDecoder().decode(pt);
+      try{
+        if(remember.checked || silent) localStorage.setItem(STORE, code);
+        else localStorage.removeItem(STORE);
+      }catch(e){}
+      document.removeEventListener('keydown', onKey);
+      document.open();
+      document.write(html);
+      document.close();
+    }catch(e){
+      setBusy(false);
+      if(silent){
+        try{ localStorage.removeItem(STORE); }catch(_){}
+        msgEl.textContent = '';
+        return;
+      }
+      msgEl.textContent = 'PINコードが違います';
+      dotsEl.classList.remove('shake'); void dotsEl.offsetWidth; dotsEl.classList.add('shake');
+      pin = ''; draw();
+    }
+  }
+
+  function press(k){
+    if(busy) return;
+    if(k === 'del'){ pin = pin.slice(0, -1); }
+    else if(k === 'ok'){ tryUnlock(pin, false); return; }
+    else if(/^\d$/.test(k) && pin.length < MAX){ pin += k; }
+    msgEl.textContent = '';
+    draw();
+  }
+  pad.addEventListener('click', e => { const b = e.target.closest('button'); if(b) press(b.dataset.k); });
+  function onKey(e){
+    if(/^\d$/.test(e.key)) press(e.key);
+    else if(e.key === 'Backspace') press('del');
+    else if(e.key === 'Enter') press('ok');
+  }
+  document.addEventListener('keydown', onKey);
+
+  draw();
+  if(!window.crypto || !crypto.subtle){
+    msgEl.textContent = 'このブラウザでは開けません。最新のブラウザでアクセスしてください';
+    pad.querySelectorAll('button').forEach(x => x.disabled = true);
+    return;
+  }
+  let saved = null;
+  try{ saved = localStorage.getItem(STORE); }catch(e){}
+  if(saved){ remember.checked = true; tryUnlock(saved, true); }
+})();
+</script>
+</body>
+</html>
