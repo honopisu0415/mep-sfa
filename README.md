@@ -32,3 +32,10 @@ PINを変えるときは、`decrypt` を旧PINで、`encrypt` を新PINで実行
 ## 移行元
 
 Macaly（https://ttq1xeivf182ksekw7sa1kr9.macaly.app）から 2026-10-17 に移行。
+
+## シフト作成タブ（2026-10 追加）
+
+- データは Supabase に保存（`supabase/schema.sql`）。ブラウザからはテーブルを直接読めず、ログイン付きの関数だけを呼べる設計。
+- 役割：全体管理者（カレンダー・店舗の追加）／店長（店舗設定・スタッフ・自動作成・確定）／社員（希望入力）。
+- 自動作成・チェックのロジックは `src/app.html` 内の `ShiftEngine`（ブラウザ内で計算）。
+- DBの関数を変えたときは、`supabase/schema.sql` を Supabase の SQL Editor で再実行する（何度実行してもデータは消えない）。
