@@ -55,6 +55,8 @@ create table if not exists public.sessions (
 
 -- 社員はパスワードなしで入れる（店長が設定で切り替え）
 alter table public.stores add column if not exists staff_open boolean not null default true;
+-- 店長もパスワードなしで入れる（店長が設定で切り替え）
+alter table public.stores add column if not exists manager_open boolean not null default true;
 
 -- ブラウザから直接テーブルを読み書きさせない（下の関数経由のみ）
 alter table public.app_global enable row level security;
@@ -253,7 +255,7 @@ declare s stores;
 begin
   select * into s from stores where code = lower(trim(p_code));
   if s.id is null then return jsonb_build_object('ok', false, 'error', 'NO_STORE'); end if;
-  return jsonb_build_object('ok', true, 'code', s.code, 'name', s.name, 'staffOpen', s.staff_open);
+  return jsonb_build_object('ok', true, 'code', s.code, 'name', s.name, 'staffOpen', s.staff_open, 'managerOpen', s.manager_open);
 end $$;
 
 create or replace function public.store_login_staff(p_code text) returns jsonb
@@ -265,6 +267,26 @@ begin
   if not s.staff_open then return jsonb_build_object('ok', false, 'error', 'NEED_PASSWORD'); end if;
   return jsonb_build_object('ok', true, 'token', _new_session('staff', s.id), 'role', 'staff',
                             'store', jsonb_build_object('code', s.code, 'name', s.name));
+end $$;
+
+create or replace function public.store_login_manager(p_code text) returns jsonb
+language plpgsql volatile security definer set search_path = public, extensions as $$
+declare s stores;
+begin
+  select * into s from stores where code = lower(trim(p_code));
+  if s.id is null then return jsonb_build_object('ok', false, 'error', 'NO_STORE'); end if;
+  if not s.manager_open then return jsonb_build_object('ok', false, 'error', 'NEED_PASSWORD'); end if;
+  return jsonb_build_object('ok', true, 'token', _new_session('manager', s.id), 'role', 'manager',
+                            'store', jsonb_build_object('code', s.code, 'name', s.name));
+end $$;
+
+create or replace function public.set_manager_open(p_token uuid, p_open boolean) returns jsonb
+language plpgsql volatile security definer set search_path = public, extensions as $$
+declare a record;
+begin
+  select * into a from _auth(p_token, 'manager');
+  update stores set manager_open = coalesce(p_open, true), updated_at = now() where id = a.o_store;
+  return jsonb_build_object('ok', true);
 end $$;
 
 create or replace function public.set_staff_open(p_token uuid, p_open boolean) returns jsonb
@@ -311,7 +333,7 @@ declare a record; s stores;
 begin
   select * into a from _auth(p_token, 'store');
   select * into s from stores where id = a.o_store;
-  return jsonb_build_object('code', s.code, 'name', s.name, 'settings', s.settings, 'updated_at', s.updated_at, 'staffOpen', s.staff_open);
+  return jsonb_build_object('code', s.code, 'name', s.name, 'settings', s.settings, 'updated_at', s.updated_at, 'staffOpen', s.staff_open, 'managerOpen', s.manager_open);
 end $$;
 
 create or replace function public.save_store_settings(p_token uuid, p_settings jsonb) returns jsonb
@@ -458,7 +480,7 @@ begin
     'app', 'mepsfa-shift', 'version', 1, 'exported_at', now(),
     'global', coalesce((select jsonb_object_agg(key, value) from app_global where key in ('calendar','notice')), '{}'::jsonb),
     'stores', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'code', code, 'name', name, 'manager_hash', manager_hash,
-                 'staff_hash', staff_hash, 'staff_open', staff_open, 'settings', settings) order by created_at) from stores), '[]'::jsonb),
+                 'staff_hash', staff_hash, 'staff_open', staff_open, 'manager_open', manager_open, 'settings', settings) order by created_at) from stores), '[]'::jsonb),
     'months', coalesce((select jsonb_agg(jsonb_build_object('store_id', store_id, 'ym', ym, 'doc', doc) order by store_id, ym) from months), '[]'::jsonb),
     'wishes', coalesce((select jsonb_agg(jsonb_build_object('store_id', store_id, 'ym', ym, 'staff_id', staff_id, 'data', data)) from wishes), '[]'::jsonb));
   insert into app_global(key, value, updated_at) values ('lastBackup', jsonb_build_object('at', now()), now())
@@ -477,11 +499,11 @@ begin
     select key, value, now() from jsonb_each(coalesce(p_data->'global','{}'::jsonb)) where key in ('calendar','notice')
   on conflict (key) do update set value = excluded.value, updated_at = now();
   for e in select * from jsonb_array_elements(coalesce(p_data->'stores','[]'::jsonb)) loop
-    insert into stores(id, code, name, manager_hash, staff_hash, staff_open, settings, updated_at)
+    insert into stores(id, code, name, manager_hash, staff_hash, staff_open, manager_open, settings, updated_at)
     values ((e->>'id')::uuid, e->>'code', e->>'name', e->>'manager_hash', e->>'staff_hash',
-            coalesce((e->>'staff_open')::boolean, true), coalesce(e->'settings','{}'::jsonb), now())
+            coalesce((e->>'staff_open')::boolean, true), coalesce((e->>'manager_open')::boolean, true), coalesce(e->'settings','{}'::jsonb), now())
     on conflict (id) do update set code = excluded.code, name = excluded.name, manager_hash = excluded.manager_hash,
-      staff_hash = excluded.staff_hash, staff_open = excluded.staff_open, settings = excluded.settings, updated_at = now();
+      staff_hash = excluded.staff_hash, staff_open = excluded.staff_open, manager_open = excluded.manager_open, settings = excluded.settings, updated_at = now();
     n_s := n_s + 1;
   end loop;
   for e in select * from jsonb_array_elements(coalesce(p_data->'months','[]'::jsonb)) loop
@@ -508,6 +530,7 @@ grant execute on function
   public.admin_save_global(uuid, text, jsonb), public.get_global(uuid),
   public.store_login(text, text), public.logout(uuid), public.whoami(uuid),
   public.store_lookup(text), public.store_login_staff(text), public.set_staff_open(uuid, boolean),
+  public.store_login_manager(text), public.set_manager_open(uuid, boolean),
   public.get_wish_board(uuid, text),
   public.admin_backup_info(uuid), public.admin_export(uuid), public.admin_restore(uuid, jsonb),
   public.get_store(uuid), public.save_store_settings(uuid, jsonb), public.change_store_password(uuid, text, text),
