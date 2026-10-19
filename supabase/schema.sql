@@ -438,6 +438,66 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
+-- バックアップ（全体管理者のみ）
+-- ---------------------------------------------------------------------
+create or replace function public.admin_backup_info(p_token uuid) returns jsonb
+language plpgsql volatile security definer set search_path = public, extensions as $$
+begin
+  perform _auth(p_token, 'admin');
+  return jsonb_build_object(
+    'last', (select value->>'at' from app_global where key = 'lastBackup'),
+    'stores', (select count(*) from stores), 'months', (select count(*) from months), 'wishes', (select count(*) from wishes));
+end $$;
+
+create or replace function public.admin_export(p_token uuid) returns jsonb
+language plpgsql volatile security definer set search_path = public, extensions as $$
+declare r jsonb;
+begin
+  perform _auth(p_token, 'admin');
+  r := jsonb_build_object(
+    'app', 'mepsfa-shift', 'version', 1, 'exported_at', now(),
+    'global', coalesce((select jsonb_object_agg(key, value) from app_global where key in ('calendar','notice')), '{}'::jsonb),
+    'stores', coalesce((select jsonb_agg(jsonb_build_object('id', id, 'code', code, 'name', name, 'manager_hash', manager_hash,
+                 'staff_hash', staff_hash, 'staff_open', staff_open, 'settings', settings) order by created_at) from stores), '[]'::jsonb),
+    'months', coalesce((select jsonb_agg(jsonb_build_object('store_id', store_id, 'ym', ym, 'doc', doc) order by store_id, ym) from months), '[]'::jsonb),
+    'wishes', coalesce((select jsonb_agg(jsonb_build_object('store_id', store_id, 'ym', ym, 'staff_id', staff_id, 'data', data)) from wishes), '[]'::jsonb));
+  insert into app_global(key, value, updated_at) values ('lastBackup', jsonb_build_object('at', now()), now())
+  on conflict (key) do update set value = excluded.value, updated_at = now();
+  return r;
+end $$;
+
+-- 復元：バックアップの内容で上書き・追加する（バックアップにないデータは消さない）。全部成功するか、何も変わらないかのどちらか
+create or replace function public.admin_restore(p_token uuid, p_data jsonb) returns jsonb
+language plpgsql volatile security definer set search_path = public, extensions as $$
+declare e jsonb; n_s int := 0; n_m int := 0; n_w int := 0;
+begin
+  perform _auth(p_token, 'admin');
+  if coalesce(p_data->>'app','') <> 'mepsfa-shift' then raise exception 'BAD_BACKUP'; end if;
+  insert into app_global(key, value, updated_at)
+    select key, value, now() from jsonb_each(coalesce(p_data->'global','{}'::jsonb)) where key in ('calendar','notice')
+  on conflict (key) do update set value = excluded.value, updated_at = now();
+  for e in select * from jsonb_array_elements(coalesce(p_data->'stores','[]'::jsonb)) loop
+    insert into stores(id, code, name, manager_hash, staff_hash, staff_open, settings, updated_at)
+    values ((e->>'id')::uuid, e->>'code', e->>'name', e->>'manager_hash', e->>'staff_hash',
+            coalesce((e->>'staff_open')::boolean, true), coalesce(e->'settings','{}'::jsonb), now())
+    on conflict (id) do update set code = excluded.code, name = excluded.name, manager_hash = excluded.manager_hash,
+      staff_hash = excluded.staff_hash, staff_open = excluded.staff_open, settings = excluded.settings, updated_at = now();
+    n_s := n_s + 1;
+  end loop;
+  for e in select * from jsonb_array_elements(coalesce(p_data->'months','[]'::jsonb)) loop
+    insert into months(store_id, ym, doc, updated_at) values ((e->>'store_id')::uuid, e->>'ym', coalesce(e->'doc','{}'::jsonb), now())
+    on conflict (store_id, ym) do update set doc = excluded.doc, updated_at = now();
+    n_m := n_m + 1;
+  end loop;
+  for e in select * from jsonb_array_elements(coalesce(p_data->'wishes','[]'::jsonb)) loop
+    insert into wishes(store_id, ym, staff_id, data, updated_at) values ((e->>'store_id')::uuid, e->>'ym', e->>'staff_id', coalesce(e->'data','{}'::jsonb), now())
+    on conflict (store_id, ym, staff_id) do update set data = excluded.data, updated_at = now();
+    n_w := n_w + 1;
+  end loop;
+  return jsonb_build_object('ok', true, 'stores', n_s, 'months', n_m, 'wishes', n_w);
+end $$;
+
+-- ---------------------------------------------------------------------
 -- 公開する関数（ブラウザから呼べるのはこれだけ）
 -- ---------------------------------------------------------------------
 revoke execute on all functions in schema public from public, anon, authenticated;
@@ -449,6 +509,7 @@ grant execute on function
   public.store_login(text, text), public.logout(uuid), public.whoami(uuid),
   public.store_lookup(text), public.store_login_staff(text), public.set_staff_open(uuid, boolean),
   public.get_wish_board(uuid, text),
+  public.admin_backup_info(uuid), public.admin_export(uuid), public.admin_restore(uuid, jsonb),
   public.get_store(uuid), public.save_store_settings(uuid, jsonb), public.change_store_password(uuid, text, text),
   public.list_months(uuid), public.get_month(uuid, text), public.save_month(uuid, text, jsonb, timestamptz),
   public.delete_month(uuid, text), public.get_wish(uuid, text, text), public.save_wish(uuid, text, text, jsonb)
