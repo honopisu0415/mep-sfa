@@ -400,7 +400,33 @@ begin
     'deadline', m.doc->'deadline',
     'message', m.doc->'message',
     'overrides', m.doc->'overrides',
+    'shareDraft', coalesce(m.doc->>'shareDraft','true') <> 'false',
+    'draft', case when coalesce(m.doc->>'status','collecting') = 'draft' and coalesce(m.doc->>'shareDraft','true') <> 'false'
+                  then m.doc->'draft' else null end,
     'final', case when m.doc->>'status' = 'final' then m.doc->'final' else null end));
+end $$;
+
+-- 社員：作成中のシフトを見て「修正のお願い」を送る（希望の中身は変えず requests だけ書き換える）
+create or replace function public.save_request(p_token uuid, p_ym text, p_staff_id text, p_requests jsonb) returns jsonb
+language plpgsql volatile security definer set search_path = public, extensions as $$
+declare a record; m months; s stores;
+begin
+  select * into a from _auth(p_token, 'store');
+  select * into m from months where store_id = a.o_store and ym = p_ym;
+  if m.store_id is null then raise exception 'NO_MONTH'; end if;
+  select * into s from stores where id = a.o_store;
+  if not exists (select 1 from jsonb_array_elements(coalesce(s.settings->'staff','[]'::jsonb)) e where e->>'id' = p_staff_id) then
+    raise exception 'NO_STAFF';
+  end if;
+  if a.o_role = 'staff' and (coalesce(m.doc->>'status','collecting') <> 'draft' or coalesce(m.doc->>'shareDraft','true') = 'false') then
+    raise exception 'CLOSED';
+  end if;
+  if jsonb_typeof(p_requests) <> 'array' or jsonb_array_length(p_requests) > 62 then raise exception 'BAD_DATA'; end if;
+  insert into wishes(store_id, ym, staff_id, data, updated_at)
+    values (a.o_store, p_ym, p_staff_id, jsonb_build_object('requests', p_requests), now())
+  on conflict (store_id, ym, staff_id) do update
+    set data = wishes.data || jsonb_build_object('requests', p_requests), updated_at = now();
+  return jsonb_build_object('ok', true);
 end $$;
 
 create or replace function public.save_month(p_token uuid, p_ym text, p_doc jsonb, p_expected timestamptz default null) returns jsonb
@@ -535,7 +561,8 @@ grant execute on function
   public.admin_backup_info(uuid), public.admin_export(uuid), public.admin_restore(uuid, jsonb),
   public.get_store(uuid), public.save_store_settings(uuid, jsonb), public.change_store_password(uuid, text, text),
   public.list_months(uuid), public.get_month(uuid, text), public.save_month(uuid, text, jsonb, timestamptz),
-  public.delete_month(uuid, text), public.get_wish(uuid, text, text), public.save_wish(uuid, text, text, jsonb)
+  public.delete_month(uuid, text), public.get_wish(uuid, text, text), public.save_wish(uuid, text, text, jsonb),
+  public.save_request(uuid, text, text, jsonb)
 to anon, authenticated;
 
 notify pgrst, 'reload schema';
