@@ -160,8 +160,11 @@ create or replace function public.admin_list_stores(p_token uuid) returns jsonb
 language plpgsql volatile security definer set search_path = public, extensions as $$
 begin
   perform _auth(p_token, 'admin');
-  return coalesce((select jsonb_agg(jsonb_build_object('code', code, 'name', name, 'created_at', created_at) order by created_at)
-                     from stores), '[]'::jsonb);
+  return coalesce((select jsonb_agg(jsonb_build_object('code', st.code, 'name', st.name, 'created_at', st.created_at,
+                     'staff', coalesce(jsonb_array_length(st.settings->'staff'), 0),
+                     'months', (select count(*) from months m where m.store_id = st.id),
+                     'lastUpdate', greatest(st.updated_at, (select max(m.updated_at) from months m where m.store_id = st.id))) order by st.created_at)
+                     from stores st), '[]'::jsonb);
 end $$;
 
 create or replace function public.admin_create_store(p_token uuid, p_code text, p_name text, p_manager_pw text, p_staff_pw text) returns jsonb
@@ -203,6 +206,70 @@ begin
 end $$;
 
 -- 全店共通データ（calendar：月ごとの休日数・祝日 / notice：お知らせ）
+-- ---------------------------------------------------------------------
+-- 店舗の自己登録（各店舗の店長が自分で店舗コードと店舗名を登録する）
+--   app_global 'register' = { open: bool, keyHash: text|null }
+-- ---------------------------------------------------------------------
+create or replace function public.register_status() returns jsonb
+language sql stable security definer set search_path = public, extensions as $$
+  select jsonb_build_object(
+    'open', coalesce((select (value->>'open')::boolean from app_global where key = 'register'), true),
+    'needKey', coalesce((select value->>'keyHash' from app_global where key = 'register'), '') <> '');
+$$;
+
+create or replace function public.admin_set_register(p_token uuid, p_open boolean, p_key text) returns jsonb
+language plpgsql volatile security definer set search_path = public, extensions as $$
+declare cur jsonb; h text;
+begin
+  perform _auth(p_token, 'admin');
+  select value into cur from app_global where key = 'register';
+  h := cur->>'keyHash';
+  if p_key is not null then
+    if p_key = '' then h := null;
+    elsif length(p_key) < 4 then raise exception 'WEAK';
+    else h := _hash(p_key); end if;
+  end if;
+  insert into app_global(key, value, updated_at)
+    values ('register', jsonb_build_object('open', coalesce(p_open, true), 'keyHash', h), now())
+  on conflict (key) do update set value = excluded.value, updated_at = now();
+  return register_status();
+end $$;
+
+create or replace function public.store_register(p_code text, p_name text, p_key text) returns jsonb
+language plpgsql volatile security definer set search_path = public, extensions as $$
+declare r jsonb; sid uuid;
+begin
+  select value into r from app_global where key = 'register';
+  if not coalesce((r->>'open')::boolean, true) then raise exception 'REGISTER_CLOSED'; end if;
+  if coalesce(r->>'keyHash','') <> '' and not _check(coalesce(p_key,''), r->>'keyHash') then
+    raise exception 'BAD_KEY';
+  end if;
+  -- いたずら防止：1時間に作れる店舗数に上限
+  if (select count(*) from stores where created_at > now() - interval '1 hour') >= 30 then raise exception 'TOO_MANY'; end if;
+  p_code := lower(trim(p_code));
+  if not _valid_code(p_code) then raise exception 'BAD_CODE'; end if;
+  if length(trim(coalesce(p_name,''))) = 0 or length(trim(p_name)) > 40 then raise exception 'BAD_NAME'; end if;
+  if exists(select 1 from stores where code = p_code) then raise exception 'DUPLICATE'; end if;
+  insert into stores(code, name, manager_hash, staff_hash, staff_open, manager_open)
+    values (p_code, trim(p_name), _hash(gen_random_uuid()::text), _hash(gen_random_uuid()::text), true, true)
+  returning id into sid;
+  return jsonb_build_object('ok', true, 'token', _new_session('manager', sid), 'role', 'manager',
+                            'store', jsonb_build_object('code', p_code, 'name', trim(p_name)));
+end $$;
+
+-- 全体管理者：店舗の削除（店舗コードをもう一度入力して確認。その店舗の月・希望もすべて消える）
+create or replace function public.admin_delete_store(p_token uuid, p_code text, p_confirm text) returns jsonb
+language plpgsql volatile security definer set search_path = public, extensions as $$
+declare s stores;
+begin
+  perform _auth(p_token, 'admin');
+  select * into s from stores where code = lower(trim(p_code));
+  if s.id is null then raise exception 'NOT_FOUND'; end if;
+  if lower(trim(coalesce(p_confirm,''))) <> s.code then raise exception 'CONFIRM'; end if;
+  delete from stores where id = s.id;
+  return jsonb_build_object('ok', true);
+end $$;
+
 create or replace function public.admin_save_global(p_token uuid, p_key text, p_value jsonb) returns jsonb
 language plpgsql volatile security definer set search_path = public, extensions as $$
 begin
@@ -562,7 +629,9 @@ grant execute on function
   public.get_store(uuid), public.save_store_settings(uuid, jsonb), public.change_store_password(uuid, text, text),
   public.list_months(uuid), public.get_month(uuid, text), public.save_month(uuid, text, jsonb, timestamptz),
   public.delete_month(uuid, text), public.get_wish(uuid, text, text), public.save_wish(uuid, text, text, jsonb),
-  public.save_request(uuid, text, text, jsonb)
+  public.save_request(uuid, text, text, jsonb),
+  public.register_status(), public.admin_set_register(uuid, boolean, text), public.store_register(text, text, text),
+  public.admin_delete_store(uuid, text, text)
 to anon, authenticated;
 
 notify pgrst, 'reload schema';
