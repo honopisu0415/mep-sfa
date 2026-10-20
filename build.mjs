@@ -4,6 +4,9 @@
 //   PIN=12345678 node build.mjs encrypt   … src/app.html を暗号化して index.html を作る
 //   PIN=12345678 node build.mjs decrypt   … index.html を復号して src/app.html を取り出す
 //
+//   DOCS_PIN=0001 を一緒に指定すると、資料ダウンロードの一覧（/*DOCS:PLAIN*/…/*DOCS:PLAIN_END*/）を
+//   さらにそのコードで暗号化します（decrypt 時も DOCS_PIN があれば平文に戻します）。
+//
 // src/app.html（平文の中身）は .gitignore で除外しており、リポジトリには
 // 暗号化済みの index.html だけが載ります。編集するときは decrypt → 編集 → encrypt。
 
@@ -33,15 +36,38 @@ const enc = new TextEncoder();
 const b64 = (u8) => Buffer.from(u8).toString('base64');
 const unb64 = (s) => new Uint8Array(Buffer.from(s, 'base64'));
 
-async function deriveKey(salt) {
-  const base = await crypto.subtle.importKey('raw', enc.encode(pin), 'PBKDF2', false, ['deriveKey']);
+async function deriveKey(salt, code = pin) {
+  const base = await crypto.subtle.importKey('raw', enc.encode(code), 'PBKDF2', false, ['deriveKey']);
   return crypto.subtle.deriveKey(
     { name: 'PBKDF2', salt, iterations: ITERATIONS, hash: 'SHA-256' },
     base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
 }
 
+const docsPin = process.env.DOCS_PIN;
+const DOCS_RE = /\/\*DOCS:PLAIN\*\/([\s\S]*?)\/\*DOCS:PLAIN_END\*\//;
+const DOCS_ENC_RE = /\/\*DOCS:ENC\*\/([\s\S]*?)\/\*DOCS:ENC_END\*\//;
+async function lockDocs(html) {
+  const m = html.match(DOCS_RE);
+  if (!m) return html;
+  if (!docsPin) { console.error('資料一覧が平文です。DOCS_PIN=コード を指定してください'); process.exit(1); }
+  const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveKey(salt, docsPin);
+  const plain = JSON.stringify(JSON.parse(m[1].replace(/,\s*\]$/, ']')));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(plain)));
+  const blob = JSON.stringify({ v: 1, it: ITERATIONS, s: b64(salt), i: b64(iv), c: b64(ct) });
+  return html.replace(DOCS_RE, () => '/*DOCS:ENC*/' + blob + '/*DOCS:ENC_END*/');
+}
+async function unlockDocs(html) {
+  const m = html.match(DOCS_ENC_RE);
+  if (!m || !docsPin) return html;
+  const p = JSON.parse(m[1]);
+  const key = await deriveKey(unb64(p.s), docsPin);
+  const pt = Buffer.from(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(p.i) }, key, unb64(p.c))).toString('utf8');
+  return html.replace(DOCS_ENC_RE, () => '/*DOCS:PLAIN*/' + JSON.stringify(JSON.parse(pt), null, 2) + '/*DOCS:PLAIN_END*/');
+}
+
 if (mode === 'encrypt') {
-  const html = readFileSync(SRC, 'utf8');
+  const html = await lockDocs(readFileSync(SRC, 'utf8'));
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const key = await deriveKey(salt);
@@ -65,6 +91,6 @@ if (mode === 'encrypt') {
     process.exit(1);
   }
   mkdirSync(dirname(SRC), { recursive: true });
-  writeFileSync(SRC, Buffer.from(pt));
+  writeFileSync(SRC, await unlockDocs(Buffer.from(pt).toString('utf8')));
   console.log('復号しました → src/app.html');
 }

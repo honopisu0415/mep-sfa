@@ -21,11 +21,13 @@ GitHub Pages で公開しています。
 ## 中身を編集する手順
 
 ```bash
-PIN=xxxxxxxx node build.mjs decrypt   # index.html → src/app.html を取り出す
+PIN=xxxxxxxx DOCS_PIN=xxxx node build.mjs decrypt   # index.html → src/app.html を取り出す
 # src/app.html を編集
-PIN=xxxxxxxx node build.mjs encrypt   # src/app.html → index.html を作り直す
+PIN=xxxxxxxx DOCS_PIN=xxxx node build.mjs encrypt   # src/app.html → index.html を作り直す
 git add index.html && git commit -m "更新内容" && git push
 ```
+
+「資料ダウンロード」の一覧は、さらに `DOCS_PIN`（資料用のコード）で暗号化しています。`DOCS_PIN` なしで decrypt すると資料一覧は暗号化されたまま取り出されます（そのまま encrypt しても壊れません）。
 
 PINを変えるときは、`decrypt` を旧PINで、`encrypt` を新PINで実行します。
 
