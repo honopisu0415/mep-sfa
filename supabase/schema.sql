@@ -467,6 +467,7 @@ begin
     'deadline', m.doc->'deadline',
     'message', m.doc->'message',
     'overrides', m.doc->'overrides',
+    'staffMonth', m.doc->'staffMonth',
     'shareDraft', coalesce(m.doc->>'shareDraft','true') <> 'false',
     'draft', case when coalesce(m.doc->>'status','collecting') = 'draft' and coalesce(m.doc->>'shareDraft','true') <> 'false'
                   then m.doc->'draft' else null end,
