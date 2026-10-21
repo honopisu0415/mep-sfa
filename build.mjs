@@ -66,8 +66,34 @@ async function unlockDocs(html) {
   return html.replace(DOCS_ENC_RE, () => '/*DOCS:PLAIN*/' + JSON.stringify(JSON.parse(pt), null, 2) + '/*DOCS:PLAIN_END*/');
 }
 
+// 公開のたびに版の情報を埋め込み、version.json も書き出す（開いている画面が新しい版に気づけるように）
+function stampVersion(html) {
+  const now = new Date();
+  const id = now.getTime().toString(36);
+  const at = now.toISOString();
+  const note = (process.env.NOTE || '').slice(0, 200);
+  writeFileSync(join(ROOT, 'version.json'), JSON.stringify({ id, at, note }) + '\n');
+  const tag = `<script id="appVersion">window.APP_BUILD=${JSON.stringify({ id, at, note })};
+(function(){
+  var B=window.APP_BUILD, shown=false;
+  function fmt(t){var d=new Date(t);return (d.getMonth()+1)+'/'+d.getDate()+' '+('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2);}
+  function stamp(){var f=document.querySelector('footer');if(!f||document.getElementById('appVer'))return;var s=document.createElement('div');s.id='appVer';s.style.cssText='margin-top:8px;font-size:11px;color:#B9A4AC';s.textContent='バージョン：'+fmt(B.at)+' 更新';f.appendChild(s);}
+  function banner(v){if(shown)return;shown=true;var d=document.createElement('div');d.id='appUpdate';
+    d.style.cssText='position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:200;background:#2B2321;color:#fff;padding:10px 12px 10px 18px;border-radius:999px;box-shadow:0 12px 30px rgba(0,0,0,.3);display:flex;align-items:center;gap:12px;font:700 13px sans-serif;max-width:calc(100vw - 24px)';
+    d.innerHTML='<span>🔔 新しいバージョンがあります（'+fmt(v.at)+'）'+(v.note?'：'+String(v.note).replace(/[<>&]/g,''):'')+'</span><button style="border:0;border-radius:999px;padding:8px 16px;background:#E85D82;color:#fff;font-weight:800;cursor:pointer">更新する</button>';
+    d.querySelector('button').onclick=function(){location.href=location.pathname+'?v='+v.id;};document.body.appendChild(d);}
+  function check(){fetch('version.json?t='+Date.now(),{cache:'no-store'}).then(function(r){return r.ok?r.json():null}).then(function(v){if(v&&v.id&&v.id!==B.id)banner(v);}).catch(function(){});}
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',stamp);else stamp();
+  setTimeout(stamp,1500);
+  setInterval(check,60000);
+  document.addEventListener('visibilitychange',function(){if(!document.hidden)check();});
+  setTimeout(check,5000);
+})();</script>`;
+  return html.includes('</head>') ? html.replace('</head>', tag + '\n</head>') : tag + html;
+}
+
 if (mode === 'encrypt') {
-  const html = await lockDocs(readFileSync(SRC, 'utf8'));
+  const html = stampVersion(await lockDocs(readFileSync(SRC, 'utf8')));
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const key = await deriveKey(salt);
@@ -91,6 +117,6 @@ if (mode === 'encrypt') {
     process.exit(1);
   }
   mkdirSync(dirname(SRC), { recursive: true });
-  writeFileSync(SRC, await unlockDocs(Buffer.from(pt).toString('utf8')));
+  writeFileSync(SRC, (await unlockDocs(Buffer.from(pt).toString('utf8'))).replace(/<script id="appVersion">[\s\S]*?<\/script>\n?/, ''));
   console.log('復号しました → src/app.html');
 }
